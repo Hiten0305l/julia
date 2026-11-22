@@ -937,7 +937,15 @@ static jl_value_t *eval_body(jl_array_t *stmts, interpreter_state *s, size_t ip,
         else {
             eval_stmt_value(stmt, s);
         }
-        ip = eval_phi(stmts, s, ns, next_ip);
+        ip = next_ip;
+        if (ip < ns) {
+            // most statements cannot be part of a phi block, which eval_phi would scan for
+            jl_value_t *next = jl_array_ptr_ref(stmts, ip);
+            if (!jl_is_expr(next) && !jl_is_gotonode(next) && !jl_is_gotoifnot(next) &&
+                !jl_is_returnnode(next) && !jl_is_phicnode(next) && !jl_is_upsilonnode(next) &&
+                !jl_is_ssavalue(next))
+                ip = eval_phi(stmts, s, ns, ip);
+        }
     }
     abort();
 }
