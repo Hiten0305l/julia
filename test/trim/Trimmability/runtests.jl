@@ -46,4 +46,5 @@ outdir = ARGS[1]
     @test lines[34] == "lazy_library_ccall: $(VERSION.major) 1"
     @test lines[35] == "symbols: :sym Symbol(\"a b\") :(::)"
     @test lines[36] == "dates: 2026-03-08 2026-03-08T16:00:00.500"
+    @test lines[37] == "styled: 3"
 end

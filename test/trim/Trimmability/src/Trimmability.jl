@@ -220,6 +220,15 @@ end
     return s
 end
 
+# `lock(f, l)` passes `f` on to its keyword body without calling it, so it is specialized
+# on `f` only where the call is inlined, which a call inside a recursion is not.
+const depth_lock = ReentrantLock()
+function locked_depth(n::Int)
+    lock(depth_lock) do
+        n <= 0 ? 0 : 1 + locked_depth(n - 1)
+    end
+end
+
 function _test_threads()
     v = zeros(Int, 64)
     Threads.@threads for i in eachindex(v)
@@ -291,6 +300,8 @@ function @main(args::Vector{String})::Cint
     lazy_library_ccall()
     println(Core.stdout, "symbols: ", repr(:sym), " ", repr(Symbol("a b")), " ", repr(:(::)))
     _test_dates()
+    # `printstyled` does not specialize on the function that prints the message
+    printstyled(Core.stdout, "styled: ", locked_depth(3), "\n"; bold = true)
 
     Base.donotdelete(reshape([1,2,3],:,1,1))
 

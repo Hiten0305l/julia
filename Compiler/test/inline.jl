@@ -2373,6 +2373,46 @@ let src = code_typed1((Union{DataType,UnionAll},); interp=NoCompileSigInvokes())
     end == 1
 end
 
+# `exact_concrete_invokes` inlining option
+@newinterp ExactConcreteInvokes
+Compiler.OptimizationParams(::ExactConcreteInvokes) =
+    Compiler.OptimizationParams(; exact_concrete_invokes=true)
+const exact_concrete_invokes_ref = Ref{Any}()
+@noinline exact_concrete_invokes_data(@nospecialize x) = (exact_concrete_invokes_ref[] = x; nothing)
+@noinline exact_concrete_invokes_called(@nospecialize(f), @nospecialize(x)) = (exact_concrete_invokes_ref[] = f(x); nothing)
+# a function argument that is passed on without being called, as in the method that sorts keyword arguments
+@noinline exact_concrete_invokes_apply(f, x) = exact_concrete_invokes_call(f, x)
+@noinline exact_concrete_invokes_call(f, x) = (exact_concrete_invokes_ref[] = f(x); nothing)
+function count_invokes(src, @nospecialize(specTypes))
+    return count(src.code) do @nospecialize x
+        isexpr(x, :invoke) || return false
+        edge = x.args[1]
+        mi = edge isa Core.CodeInstance ? edge.def : edge::Core.MethodInstance
+        return mi.specTypes == specTypes
+    end
+end
+# a call with concrete argument types invokes the specialization for those types
+let src = code_typed1(x -> exact_concrete_invokes_called(sin, x), (Int,))
+    @test count_invokes(src, Tuple{typeof(exact_concrete_invokes_called),Any,Any}) == 1
+end
+let src = code_typed1(x -> exact_concrete_invokes_called(sin, x), (Int,); interp=ExactConcreteInvokes())
+    @test count_invokes(src, Tuple{typeof(exact_concrete_invokes_called),typeof(sin),Int}) == 1
+end
+let src = code_typed1(x -> exact_concrete_invokes_apply(sin, x), (Int,))
+    @test count_invokes(src, Tuple{typeof(exact_concrete_invokes_apply),Function,Int}) == 1
+end
+let src = code_typed1(x -> exact_concrete_invokes_apply(sin, x), (Int,); interp=ExactConcreteInvokes())
+    @test count_invokes(src, Tuple{typeof(exact_concrete_invokes_apply),typeof(sin),Int}) == 1
+end
+# unless only `@nospecialize`d arguments that are not called would be widened
+let src = code_typed1(x -> exact_concrete_invokes_data(x), (Int,); interp=ExactConcreteInvokes())
+    @test count_invokes(src, Tuple{typeof(exact_concrete_invokes_data),Any}) == 1
+end
+# a call with abstract argument types still invokes the compilation signature
+let src = code_typed1(x -> exact_concrete_invokes_called(sin, x), (Integer,); interp=ExactConcreteInvokes())
+    @test count_invokes(src, Tuple{typeof(exact_concrete_invokes_called),Any,Any}) == 1
+end
+
 # https://github.com/JuliaLang/julia/issues/50612
 f50612(x) = UInt32(x)
 @test all(!isinvoke(:UInt32),get_code(f50612,Tuple{Char}))
