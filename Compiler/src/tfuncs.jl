@@ -1518,13 +1518,12 @@ end
         maxargs = 6
         op_argi = 3
         v_argi = 4
-    elseif ff === atomic_pointermodify
+    else
+        @assert ff === atomic_pointermodify
         minargs = 5
         maxargs = 5
         op_argi = 3
         v_argi = 4
-    else
-        @assert false "unreachable"
     end
 
     nargs = length(argtypes)
@@ -1535,66 +1534,63 @@ end
         minargs <= nargs <= maxargs || return Future(CallMeta(Bottom, Any, EFFECTS_THROWS, NoCallInfo()))
     end
     𝕃ᵢ = typeinf_lattice(interp)
-    if ff === modifyfield!
-        o = unwrapva(argtypes[2])
-        f = unwrapva(argtypes[3])
-        RT = modifyfield!_tfunc(𝕃ᵢ, o, f, Any, Any, Symbol)
-        TF = getfield_tfunc(𝕃ᵢ, o, f)
-    elseif ff === Core.modifyglobal!
-        o = unwrapva(argtypes[2])
-        f = unwrapva(argtypes[3])
-        GT = abstract_eval_get_binding_type(interp, sv, o, f).rt
-        RT = isa(GT, Const) ? Pair{GT.val, GT.val} : Pair
-        TF = isa(GT, Const) ? GT.val : Any
-    elseif ff === Core.modifyglobal_partition
-        GT = nothing
-        p = unwrapva(argtypes[2])
-        if isa(p, Const) && isa(p.val, Core.BindingPartition)
-            p = p.val::Core.BindingPartition
-            kind = binding_kind(p)
-            if kind === PARTITION_KIND_GLOBAL
-                restriction = partition_restriction(p)
-                isa(restriction, Type) && (GT = restriction)
-            elseif kind === PARTITION_KIND_DECLARED
-                GT = Any
-            end
-        end
-        RT = GT === nothing ? Pair : Pair{GT, GT}
-        TF = GT === nothing ? Any : GT
-    elseif ff === Core.memoryrefmodify!
-        o = unwrapva(argtypes[2])
-        RT = memoryrefmodify!_tfunc(𝕃ᵢ, o, Any, Any, Symbol, Bool)
-        TF = memoryrefget_tfunc(𝕃ᵢ, o, Symbol, Bool)
-    elseif ff === atomic_pointermodify
-        o = unwrapva(argtypes[2])
-        RT = atomic_pointermodify_tfunc(𝕃ᵢ, o, Any, Any, Symbol)
-        TF = atomic_pointerref_tfunc(𝕃ᵢ, o, Symbol)
-    else
-        @assert false "unreachable"
-    end
-    info = NoCallInfo()
+    RT, TF = modifyop_types(interp, 𝕃ᵢ, ff, argtypes, sv)
     if nargs >= v_argi && RT !== Bottom
         # we may be able to refine this to a PartialStruct by analyzing `op(o.f, v)::T`
         # as well as compute the info for the method matches
         op = unwrapva(argtypes[op_argi])
         v = unwrapva(argtypes[v_argi])
         callinfo = abstract_call(interp, ArgInfo(nothing, Any[op, TF, v]), StmtInfo(true, si.saw_latestworld), vtypes, sv, #=max_methods=#1)
-        TF = Core.Box(TF)
-        RT = Core.Box(RT)
-        return Future{CallMeta}(callinfo, interp, sv) do callinfo, interp, sv
-            TF = TF.contents
-            RT = RT.contents
+        return Future{CallMeta}(callinfo, interp, sv) do callinfo, interp, _
             TF2 = tmeet(ipo_lattice(interp), callinfo.rt, widenconst(TF))
             if TF2 === Bottom
-                RT = Bottom
+                rt = Bottom
             elseif isconcretetype(RT) && has_nontrivial_extended_info(𝕃ᵢ, TF2) # isconcrete condition required to form a PartialStruct
-                RT = PartialStruct(fallback_lattice, RT, Union{Nothing,Bool}[false,false], Any[TF, TF2])
+                rt = PartialStruct(fallback_lattice, RT, Union{Nothing,Bool}[false,false], Any[TF, TF2])
+            else
+                rt = RT
             end
-            info = ModifyOpInfo(callinfo.info)
-            return CallMeta(RT, Any, Effects(), info)
+            return CallMeta(rt, Any, Effects(), ModifyOpInfo(callinfo.info))
         end
     end
-    return Future(CallMeta(RT, Any, Effects(), info))
+    return Future(CallMeta(RT, Any, Effects(), NoCallInfo()))
+end
+
+# Returns `RT => TF`, where `RT` is the type of the result of the modify builtin `ff`, before
+# refining it by the call to its `op`, and `TF` is the type of the value it modifies
+function modifyop_types(interp::AbstractInterpreter, 𝕃ᵢ::AbstractLattice, @nospecialize(ff), argtypes::Vector{Any}, sv::AbsIntState)
+    if ff === modifyfield!
+        o = unwrapva(argtypes[2])
+        f = unwrapva(argtypes[3])
+        return Pair{Any,Any}(modifyfield!_tfunc(𝕃ᵢ, o, f, Any, Any, Symbol), getfield_tfunc(𝕃ᵢ, o, f))
+    elseif ff === Core.modifyglobal!
+        o = unwrapva(argtypes[2])
+        f = unwrapva(argtypes[3])
+        GT = abstract_eval_get_binding_type(interp, sv, o, f).rt
+        isa(GT, Const) && return Pair{Any,Any}(Pair{GT.val, GT.val}, GT.val)
+        return Pair{Any,Any}(Pair, Any)
+    elseif ff === Core.modifyglobal_partition
+        p = unwrapva(argtypes[2])
+        if isa(p, Const) && isa(p.val, Core.BindingPartition)
+            p = p.val::Core.BindingPartition
+            kind = binding_kind(p)
+            if kind === PARTITION_KIND_GLOBAL
+                restriction = partition_restriction(p)
+                isa(restriction, Type) && return Pair{Any,Any}(Pair{restriction, restriction}, restriction)
+            elseif kind === PARTITION_KIND_DECLARED
+                return Pair{Any,Any}(Pair{Any, Any}, Any)
+            end
+        end
+        return Pair{Any,Any}(Pair, Any)
+    elseif ff === Core.memoryrefmodify!
+        o = unwrapva(argtypes[2])
+        return Pair{Any,Any}(memoryrefmodify!_tfunc(𝕃ᵢ, o, Any, Any, Symbol, Bool), memoryrefget_tfunc(𝕃ᵢ, o, Symbol, Bool))
+    elseif ff === atomic_pointermodify
+        o = unwrapva(argtypes[2])
+        return Pair{Any,Any}(atomic_pointermodify_tfunc(𝕃ᵢ, o, Any, Any, Symbol), atomic_pointerref_tfunc(𝕃ᵢ, o, Symbol))
+    else
+        @assert false "unreachable"
+    end
 end
 
 # we could use tuple_tfunc instead of widenconst, but `o` is mutable, so that is unlikely to be beneficial
@@ -3705,11 +3701,11 @@ function return_type_tfunc(interp::AbstractInterpreter, argtypes::Vector{Any}, s
             if !hasintersect(af_argtype, ocargt)
                 return Future(CallMeta(Const(Union{}), Union{}, RT_CALL_EFFECTS, NoCallInfo()))
             end
-            rt = rewrap_unionall(uaft.parameters[2], aftw)
+            ocrt = rewrap_unionall(uaft.parameters[2], aftw)
             if aftw isa DataType
-                return Future(CallMeta(Const(rt), Union{}, RT_CALL_EFFECTS, NoCallInfo()))
+                return Future(CallMeta(Const(ocrt), Union{}, RT_CALL_EFFECTS, NoCallInfo()))
             else
-                return Future(CallMeta(Type{<:rt}, Union{}, RT_CALL_EFFECTS, NoCallInfo()))
+                return Future(CallMeta(Type{<:ocrt}, Union{}, RT_CALL_EFFECTS, NoCallInfo()))
             end
         end
     end
@@ -3725,8 +3721,8 @@ function return_type_tfunc(interp::AbstractInterpreter, argtypes::Vector{Any}, s
     # Run the abstract_call without restricting abstract call
     # sites. Otherwise, our behavior model of abstract_call
     # below will be wrong.
+    old_restrict = isa(sv, InferenceState) && sv.restrict_abstract_call_sites
     if isa(sv, InferenceState)
-        old_restrict = sv.restrict_abstract_call_sites
         sv.restrict_abstract_call_sites = false
     end
     # TODO: Could pass vtypes here to enable Conditional/MustAlias refinements
@@ -3734,7 +3730,7 @@ function return_type_tfunc(interp::AbstractInterpreter, argtypes::Vector{Any}, s
     # slot-dependent refinements will be widened. This is conservative but
     # may miss some precision opportunities.
     call = abstract_call(interp, ArgInfo(nothing, argtypes_vec), si, nothing, sv, #=max_methods=#-1)
-    tt = Core.Box(tt)
+    input_known = isa(tt, Const) || isconstType(tt)
     return Future{CallMeta}(call, interp, sv) do call, _, sv
         if isa(sv, InferenceState)
             sv.restrict_abstract_call_sites = old_restrict
@@ -3754,7 +3750,7 @@ function return_type_tfunc(interp::AbstractInterpreter, argtypes::Vector{Any}, s
             # in two ways: both as being a subtype of this, and
             # because of LimitedAccuracy causes
             return CallMeta(Type{<:rt}, Union{}, RT_CALL_EFFECTS, info)
-        elseif isa(tt.contents, Const) || isconstType(tt.contents)
+        elseif input_known
             # input arguments were known for certain
             # XXX: this doesn't imply we know anything about rt
             return CallMeta(Const(rt), Union{}, RT_CALL_EFFECTS, info)
